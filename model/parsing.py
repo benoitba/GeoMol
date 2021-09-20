@@ -32,6 +32,7 @@ def add_train_args(parser: ArgumentParser):
     parser.add_argument('--random_vec_dim', type=int, default=10)
     parser.add_argument('--random_vec_std', type=float, default=1)
     parser.add_argument('--random_alpha', action='store_true', default=False)
+    parser.add_argument('--use_egcm', action='store_true', default=False)
     parser.add_argument('--n_true_confs', type=int, default=10)
     parser.add_argument('--n_model_confs', type=int, default=10)
 

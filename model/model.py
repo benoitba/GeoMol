@@ -27,6 +27,7 @@ class GeoMol(nn.Module):
         self.loss_type = hyperparams['loss_type']
         self.teacher_force = hyperparams['teacher_force']
         self.random_alpha = hyperparams['random_alpha']
+        self.use_egcm = hyperparams['use_egcm']
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.gnn = GNN(node_dim=num_node_features + self.random_vec_dim,
@@ -53,7 +54,10 @@ class GeoMol(nn.Module):
         if self.random_alpha:
             self.alpha_mlp = MLP(in_dim=self.model_dim * 3 + self.random_vec_dim, out_dim=1, num_layers=hyperparams['alpha_mlp']['n_layers'])
         else:
-            self.alpha_mlp = MLP(in_dim=self.model_dim * 3, out_dim=1, num_layers=hyperparams['alpha_mlp']['n_layers'])
+            if self.use_egcm :
+                self.alpha_mlp = MLP(in_dim=self.model_dim * 3 + 255, out_dim=1, num_layers=hyperparams['alpha_mlp']['n_layers']) # 255 for EGCM dimension
+            else :
+                self.alpha_mlp = MLP(in_dim=self.model_dim * 3, out_dim=1, num_layers=hyperparams['alpha_mlp']['n_layers'])
         self.c_mlp = MLP(in_dim=self.model_dim * 4, out_dim=1, num_layers=hyperparams['c_mlp']['n_layers'])
 
         self.loss = torch.nn.MSELoss(reduction='none')
@@ -160,6 +164,10 @@ class GeoMol(nn.Module):
         self.neighbors = get_neighbor_ids(data)
         self.leaf_hydrogens = get_leaf_hydrogens(self.neighbors, x)
         self.dihedral_pairs = data.edge_index_dihedral_pairs
+        
+        if self.use_egcm :
+            egcm = [data.egcm[data.batch[node_i]] for node_i in self.dihedral_pairs[0]]
+            self.egcm = torch.tensor(egcm).to(self.device)
 
         self.n_neighborhoods = len(self.neighbors)
         self.n_dihedral_pairs = len(self.dihedral_pairs.t())
@@ -375,11 +383,17 @@ class GeoMol(nn.Module):
         dihedral_y_node_reps = torch.zeros([self.n_dihedral_pairs, self.n_model_confs, self.model_dim]).to(self.device)
         dihedral_y_neighbor_reps = torch.zeros([self.n_dihedral_pairs, 4, self.n_model_confs, self.model_dim]).to(self.device)
 
+        if self.use_egcm :
+            egcms = torch.zeros([self.n_dihedral_pairs, self.n_model_confs, 255]).to(self.device)
+        
         for i, (s, e) in enumerate(self.dihedral_pairs.t()):
 
             # get dihedral node embedded representations from gnn
             dihedral_x_node_reps[i, :] = x[s]
             dihedral_y_node_reps[i, :] = x[e]
+            
+            if self.use_egcm :
+                egcms[i] = self.egcm[i]
 
             # get dihedral node neighbor predicted coordinates
             dihedral_x_neighbors[i, :, :] = self.model_local_coords[self.x_to_h_map[s].long()]
@@ -399,7 +413,8 @@ class GeoMol(nn.Module):
                                                                                         dihedral_neighbors,
                                                                                         batch,
                                                                                         h_mol,
-                                                                                        dihedral_neighbor_reps)
+                                                                                        dihedral_neighbor_reps,
+                                                                                        egcms)
 
         # calculate model dihedrals
         pT_idx, qZ_idx = torch.cartesian_prod(torch.arange(3), torch.arange(3)).chunk(2, dim=-1)
@@ -516,7 +531,7 @@ class GeoMol(nn.Module):
 
         return dihedral_loss, three_hop_loss
 
-    def align_dihedral_neighbors(self, dihedral_node_reps, dihedral_neighbors, batch, h_mol, dihedral_neighbor_reps):
+    def align_dihedral_neighbors(self, dihedral_node_reps, dihedral_neighbors, batch, h_mol, dihedral_neighbor_reps, egcms=None):
         """
         Performs the alignment procedure between dihedral pairs by first rotating X and Y by predicted H_x and H_y,
         respectively, rotating X by H_alpha, and finally flipping and translating Y along the x-axis
@@ -563,14 +578,18 @@ class GeoMol(nn.Module):
         dihedral_h_mol = h_mol[batch[self.dihedral_pairs[0]]]  # (n_dihedral_pairs, n_model_confs. model_dim/2)
 
         # more stochasticity!
-        if self. random_alpha:
+        if self.random_alpha:
             rand_dist = torch.distributions.normal.Normal(loc=0, scale=self.random_vec_std)
             rand_alpha = rand_dist.sample([self.n_dihedral_pairs, self.n_model_confs, self.random_vec_dim]).squeeze(-1).to(self.device)
             alpha = self.alpha_mlp(torch.cat([dihedral_x_node_reps, dihedral_y_node_reps, dihedral_h_mol, rand_alpha], dim=-1)) + \
                     self.alpha_mlp(torch.cat([dihedral_y_node_reps, dihedral_x_node_reps, dihedral_h_mol, rand_alpha], dim=-1))
         else:
-            alpha = self.alpha_mlp(torch.cat([dihedral_x_node_reps, dihedral_y_node_reps, dihedral_h_mol], dim=-1)) + \
-                    self.alpha_mlp(torch.cat([dihedral_y_node_reps, dihedral_x_node_reps, dihedral_h_mol], dim=-1))
+            if self.use_egcm :
+                alpha = self.alpha_mlp(torch.cat([dihedral_x_node_reps, dihedral_y_node_reps, dihedral_h_mol, egcms], dim=-1)) + \
+                    self.alpha_mlp(torch.cat([dihedral_y_node_reps, dihedral_x_node_reps, dihedral_h_mol, egcms], dim=-1))
+            else :
+                alpha = self.alpha_mlp(torch.cat([dihedral_x_node_reps, dihedral_y_node_reps, dihedral_h_mol], dim=-1)) + \
+                        self.alpha_mlp(torch.cat([dihedral_y_node_reps, dihedral_x_node_reps, dihedral_h_mol], dim=-1))
         alpha = alpha.view(self.n_dihedral_pairs, self.n_model_confs, 1)
         self.v_star = torch.cat([torch.cos(alpha), torch.sin(alpha)], dim=-1)
 
