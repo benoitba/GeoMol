@@ -67,7 +67,7 @@ source activate GeoMol
 
 echo "Installing PyTorch with requested CUDA version..."
 echo "Running: conda install pytorch torchvision $CUDA -c pytorch"
-conda install pytorch torchvision $CUDA -c pytorch
+conda install pytorch==1.7.1 torchvision==0.8.2 torchaudio==0.7.2 $CUDA -c pytorch
 
 echo "Installing torch-geometric..."
 echo "Using CUDA version: $CUDA_VERSION"

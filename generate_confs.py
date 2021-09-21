@@ -40,6 +40,7 @@ model = GeoMol(**model_parameters)
 state_dict = torch.load(f'{trained_model_dir}/best_model.pt', map_location=torch.device('cpu'))
 model.load_state_dict(state_dict, strict=True)
 model.eval()
+model = model.to('cuda')
 
 test_data = pd.read_csv(test_csv)
 
@@ -53,7 +54,7 @@ for smi, n_confs in tqdm(test_data.values):
         continue
     
     # generate model predictions
-    data = Batch.from_data_list([tg_data])
+    data = Batch.from_data_list([tg_data]).to(model.device)
     model(data, inference=True, n_model_confs=n_confs*2)
     
     # set coords

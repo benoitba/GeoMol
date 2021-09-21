@@ -385,12 +385,15 @@ class GeoMol(nn.Module):
 
         if self.use_egcm :
             egcms = torch.zeros([self.n_dihedral_pairs, self.n_model_confs, 255]).to(self.device)
-        
+        else :
+            egcms = None
+
         for i, (s, e) in enumerate(self.dihedral_pairs.t()):
 
             # get dihedral node embedded representations from gnn
             dihedral_x_node_reps[i, :] = x[s]
             dihedral_y_node_reps[i, :] = x[e]
+            
             
             if self.use_egcm :
                 egcms[i] = self.egcm[i]
