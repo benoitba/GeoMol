@@ -5,6 +5,10 @@ from rdkit.Chem.rdmolfiles import MolFromPDBFile
 from Bio.PDB.PDBParser import PDBParser
 from collections import namedtuple
 import numpy as np
+from Bio.PDB.PDBExceptions import PDBConstructionWarning
+
+import warnings
+warnings.filterwarnings("ignore")
 
 Pattern = namedtuple('Pattern', ['smiles', 'index', 'max_size'])
 CoarseAtom = namedtuple('CoarseAtom', ['index', 'position'])

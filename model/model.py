@@ -14,7 +14,7 @@ import numpy as np
 import ot
 
 DEBUG_NEIGHBORHOOD_PAIRS = False
-
+torch.multiprocessing.set_start_method('spawn')
 
 class GeoMol(nn.Module):
     def __init__(self, hyperparams, num_node_features, num_edge_features):

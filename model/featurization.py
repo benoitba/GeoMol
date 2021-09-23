@@ -8,6 +8,7 @@ import numpy as np
 import glob
 import pickle
 import random
+from model.EGCMCalculator import EGCMCalculator
 
 import torch
 import torch.nn.functional as F
@@ -38,21 +39,26 @@ def one_k_encoding(value, choices):
 
 
 class pdbbind_confs(Dataset) :
-    def __init__(self, root, pdb_ids, transform=None, pre_transform=None, max_confs=10):
-        super(geom_confs, self).__init__(root, transform, pre_transform)
+    def __init__(self, root, pdb_ids, egcm_dir=None, transform=None, pre_transform=None, max_confs=10):
+        super(pdbbind_confs, self).__init__(root, transform, pre_transform)
 
         self.root = root
+        self.pdb_ids = pdb_ids
+        self.egcm_dir = egcm_dir
+        
         self.bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
         self.dihedral_pairs = {} # for memorization
-#         all_files = sorted(glob.glob(osp.join(self.root, '*.pickle')))
-#         self.pickle_files = [f for i, f in enumerate(all_files) if i in self.split]
-        self.pdb_ids = pdb_ids
+        
         self.max_confs = max_confs
 
+        self.types = {'H': 0, 'Li': 1, 'B': 2, 'C': 3, 'N': 4, 'O': 5, 'F': 6, 'Na': 7, 'Mg': 8, 'Al': 9, 'Si': 10,
+                      'P': 11, 'S': 12, 'Cl': 13, 'K': 14, 'Ca': 15, 'V': 16, 'Cr': 17, 'Mn': 18, 'Cu': 19, 'Zn': 20,
+                      'Ga': 21, 'Ge': 22, 'As': 23, 'Se': 24, 'Br': 25, 'Ag': 26, 'In': 27, 'Sb': 28, 'I': 29, 'Gd': 30,
+                      'Pt': 31, 'Au': 32, 'Hg': 33, 'Bi': 34, 'Fe' : 35}
+        
     def len(self):
-        # return len(self.pickle_files)  # should we change this to an integer for random sampling?
-        return 10000 if self.split_idx == 0 else 1000
+        return len(self.pdb_ids)
     
     
     def get(self, idx):
@@ -71,18 +77,25 @@ class pdbbind_confs(Dataset) :
 
     def featurize_mol(self, pdb_id):
         
+        #print(pdb_id)
         try :
-            mol = Chem.SDMolSupplier(f'{self.root}{pdb_id}/{pdb_id}_ligand.sdf')
+            mol = Chem.SDMolSupplier(f'{self.root}{pdb_id}/{pdb_id}_ligand.sdf')[0]
         except :
+            mol = None
             print('Impossible to read sdf file for ' + pdb_id)
             print('Trying with mol2 file')
+
+        if mol is None :
             try :
                 mol = Chem.rdmolfiles.MolFromMol2File(f'{self.root}{pdb_id}/{pdb_id}_ligand.mol2')
             except :
+                mol = None
                 print('Impossible to read mol2 file for ' + pdb_id)
-                return None
-        else :  
-            name = Chem.MolToSmiles(mol)
+
+        if mol is None :
+            return None
+            
+        name = Chem.MolToSmiles(mol)
 
         # filter mols rdkit can't intrinsically handle
         mol_ = Chem.MolFromSmiles(name)
@@ -95,9 +108,10 @@ class pdbbind_confs(Dataset) :
         if '.' in name:
             return None
         
+        N = mol.GetNumAtoms()
         # skip conformers without dihedrals
-        if mol.GetNumAtoms() < 4 or mol.GetNumBonds() < 4 or not mol.HasSubstructMatch(dihedral_pattern):
-            print('Molecule has no dihedral')
+        if N < 4 or mol.GetNumBonds() < 4 or not mol.HasSubstructMatch(dihedral_pattern):
+            #print('Molecule has no dihedral')
             return None
 
         pos = torch.zeros([self.max_confs, N, 3])
@@ -107,27 +121,24 @@ class pdbbind_confs(Dataset) :
         # skip mols with atoms with more than 4 neighbors for now
         n_neighbors = [len(a.GetNeighbors()) for a in mol.GetAtoms()]
         if np.max(n_neighbors) > 4:
-            print('More than 4 neighbor for this molecule')
+            #print('More than 4 neighbor for this molecule')
             return None
 
         # filter for conformers that may have reacted
         try:
             conf_canonical_smi = Chem.MolToSmiles(Chem.RemoveHs(mol))
         except Exception as e:
-            print('Reaction check not passed')
+            #print('Reaction check not passed')
             return None
         else :
             if conf_canonical_smi != canonical_smi:
-                print('Reaction check not passed')
+                #print('Reaction check not passed')
                 return None
 
         pos[k] = torch.tensor(mol.GetConformer().GetPositions(), dtype=torch.float)
         pos_mask[k] = 1
         correct_mol = mol
 
-        # return None if no non-reactive conformers were found
-        if k == 0:
-            return None
 
         type_idx = []
         atomic_number = []
@@ -169,7 +180,10 @@ class pdbbind_confs(Dataset) :
             start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
             row += [start, end]
             col += [end, start]
-            edge_type += 2 * [self.bonds[bond.GetBondType()]]
+            bond_type = bond.GetBondType()
+            if bond_type == BT.UNSPECIFIED :
+                return None
+            edge_type += 2 * [self.bonds[bond_type]]
             bt = tuple(sorted([bond.GetBeginAtom().GetAtomicNum(), bond.GetEndAtom().GetAtomicNum()])), bond.GetBondTypeAsDouble()
             bond_features += 2 * [int(bond.IsInRing()),
                                   int(bond.GetIsConjugated()),
@@ -194,12 +208,13 @@ class pdbbind_confs(Dataset) :
         x2 = torch.tensor(atom_features).view(N, -1)
         x = torch.cat([x1.to(torch.float), x2], dim=-1)
 
-        protein_path = f'{self.root}{pdb_id}/{pdb_id}_protein.pdb'
-        egcm = EGCMCalculator.get_egcm(mol, protein_path)
+        if self.egcm_dir is not None :
+            egcm = np.load(f'{self.egcm_dir}{pdb_id}_egcm.npy')
+            if egcm is None :
+                return None
         
         data = Data(x=x, z=z, pos=[pos], edge_index=edge_index, edge_attr=edge_attr, neighbors=neighbor_dict,
-                    chiral_tag=chiral_tag, name=name, boltzmann_weight=conf['boltzmannweight'],
-                    degeneracy=conf['degeneracy'], mol=correct_mol, pos_mask=pos_mask, egcm=egcm)
+                    chiral_tag=chiral_tag, name=name, mol=correct_mol, pos_mask=pos_mask, egcm=egcm)
         return data
 
 

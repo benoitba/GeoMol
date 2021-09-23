@@ -92,6 +92,7 @@ def set_hyperparams(args):
                    'c_mlp': {'n_layers': args.c_mlp_n_layers},
                    'loss_type': args.loss_type,
                    'teacher_force': args.teacher_force,
-                   'random_alpha': args.random_alpha}
+                   'random_alpha': args.random_alpha,
+                   'use_egcm' : args.use_egcm}
 
     return hyperparams

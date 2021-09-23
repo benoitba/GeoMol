@@ -5,14 +5,16 @@ import yaml
 import torch
 import numpy as np
 import random
+import json
 
 from model.model import GeoMol
 from model.training import train, test, NoamLR
 from utils import create_logger, dict_to_str, plot_train_val_loss, save_yaml_file, get_optimizer_and_scheduler
-from model.featurization import construct_loader
+from model.featurization import construct_loader, pdbbind_confs
 from model.parsing import parse_train_args, set_hyperparams
 
 from torch.utils.tensorboard import SummaryWriter
+from torch_geometric.data import DataLoader
 import resource
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
@@ -31,8 +33,57 @@ torch.manual_seed(args.seed)
 random.seed(args.seed)
 np.random.seed(args.seed)
 
-# construct loader and set device
-train_loader, val_loader = construct_loader(args)
+# def get_pdbbind_loader(args, filename, mode) :
+#     pdb_ids_dict = json.load(open(filename))
+#     pdb_ids = []
+#     for prot_class in pdb_ids_dict :
+#         pdb_ids = pdb_ids + pdb_ids_dict[prot_class]
+#     print(len(pdb_ids))
+#     dataset = pdbbind_confs(args.data_dir, pdb_ids, max_confs=args.n_true_confs)
+#     loader = DataLoader(dataset=dataset,
+#                         batch_size=args.batch_size,
+#                         shuffle=False if mode == 'test' else True,
+#                         num_workers=args.num_workers,
+#                         pin_memory=False)
+#     return loader
+
+# if args.use_egcm :
+#     train_loader = get_pdbbind_loader(args, 
+#         filename='data/pdbbind_protein_training_set.json', 
+#         mode='train')
+#     val_loader = get_pdbbind_loader(args,
+#         filename='data/pdbbind_protein_test_set.json',
+#         mode='test')
+
+def get_pdbbind_loader(args, filename, mode, egcm_dir) :
+    with open(filename) as f :
+        pdb_ids = [pdb_id.strip() for pdb_id in f.readlines()]
+    dataset = pdbbind_confs(args.data_dir, pdb_ids, egcm_dir=egcm_dir, max_confs=args.n_true_confs)
+    dataloader = DataLoader(dataset=dataset,
+                        batch_size=args.batch_size,
+                        shuffle=False if mode == ['val', 'test'] else True,
+                        num_workers=args.num_workers,
+                        pin_memory=False)
+    return dataloader
+
+if args.dataset == 'pdbbind' :
+    
+    egcm_dir = None
+    if args.use_egcm :
+        egcm_dir = 'data/egcms/'
+    
+    train_loader = get_pdbbind_loader(args, 
+        filename='data/pdbbind_training_set.txt', 
+        mode='train', egcm_dir=egcm_dir)
+    val_loader = get_pdbbind_loader(args,
+        filename='data/pdbbind_test_set.txt',
+        mode='test', egcm_dir=egcm_dir)
+
+else : # regular GeoMol
+    train_loader, val_loader = construct_loader(args)
+    
+print('Loaders done')
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # build model
@@ -49,6 +100,8 @@ else:
                         'num_node_features': train_loader.dataset.num_node_features,
                         'num_edge_features': train_loader.dataset.num_edge_features}
     model = GeoMol(**model_parameters).to(device)
+
+print('Model built')
 
 # get optimizer and scheduler
 optimizer, scheduler = get_optimizer_and_scheduler(args, model, len(train_loader.dataset))
